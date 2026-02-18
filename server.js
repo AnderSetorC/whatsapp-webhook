@@ -44,6 +44,10 @@ app.post("/webhook/whatsapp", (req, res) => {
     }
 
     console.log("=== PROCESSADO ===")
+    // limpa o sufixo do whatsapp
+if (telefone) {
+  telefone = telefone.replace("@s.whatsapp.net", "")
+}
     console.log({
       telefone,
       nome,
