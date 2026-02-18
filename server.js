@@ -7,26 +7,56 @@ app.use(cors())
 app.use(express.json())
 
 app.post("/webhook/whatsapp", (req, res) => {
-  const body = req.body
+  try {
+    const body = req.body
 
-  const telefone = body.from
-  const nome = body.pushName
-  const mensagem = body.message?.conversation || ""
+    console.log("=== BODY COMPLETO RECEBIDO ===")
+    console.log(JSON.stringify(body, null, 2))
 
-  let etiqueta = "NÃO RASTREADA"
+    // 🔹 Tentativa 1: formato simples (teste manual)
+    let telefone = body.from
+    let nome = body.pushName
+    let mensagem = body.message?.conversation
 
-  if (/vim pelo site/i.test(mensagem)) {
-    etiqueta = "SITE OFICIAL"
+    // 🔹 Tentativa 2: formato Evolution (mais comum)
+    if (body?.data?.key?.remoteJid) {
+      telefone = body.data.key.remoteJid
+    }
+
+    if (body?.data?.pushName) {
+      nome = body.data.pushName
+    }
+
+    if (body?.data?.message?.conversation) {
+      mensagem = body.data.message.conversation
+    }
+
+    if (body?.data?.message?.extendedTextMessage?.text) {
+      mensagem = body.data.message.extendedTextMessage.text
+    }
+
+    mensagem = mensagem || ""
+
+    let etiqueta = "NÃO RASTREADA"
+
+    if (/vim pelo site/i.test(mensagem)) {
+      etiqueta = "SITE OFICIAL"
+    }
+
+    console.log("=== PROCESSADO ===")
+    console.log({
+      telefone,
+      nome,
+      mensagem,
+      etiqueta
+    })
+
+    res.status(200).json({ success: true })
+
+  } catch (error) {
+    console.error("ERRO NO WEBHOOK:", error)
+    res.status(500).json({ error: "Erro interno" })
   }
-
-  console.log({
-    telefone,
-    nome,
-    mensagem,
-    etiqueta
-  })
-
-  res.status(200).json({ success: true })
 })
 
 module.exports = app
