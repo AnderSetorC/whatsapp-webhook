@@ -65,13 +65,36 @@ app.post("/webhook/whatsapp", async (req, res) => {
       body?.message?.conversation ||
       ""
 
-    if (telefone) {
-      telefone = telefone.replace("@s.whatsapp.net", "")
-    }
-
-    // Se não tem telefone, ignora (pode ser evento de status, etc.)
     if (!telefone) {
       return res.status(200).json({ success: true, info: "sem telefone" })
+    }
+
+    // ============================
+    // IDENTIFICA TIPO DE CONVERSA
+    // ============================
+
+    const isGroup = telefone.includes("@g.us")
+    const isLid = telefone.includes("@lid")
+    const isNewsletter = telefone.includes("newsletter")
+    const isStatus = telefone === "status@broadcast"
+
+    // Ignora status e newsletters
+    if (isStatus || isNewsletter) {
+      return res.status(200).json({ success: true, info: "ignorado" })
+    }
+
+    // Limpa o telefone removendo sufixos do WhatsApp
+    telefone = telefone
+      .replace("@s.whatsapp.net", "")
+      .replace("@g.us", "")
+      .replace("@lid", "")
+
+    // Para grupos/listas (formato: 5514991291256-1560098577), pega só o primeiro número
+    if (isGroup || isLid) {
+      const parts = telefone.split("-")
+      if (parts.length > 1 && parts[0].match(/^\d{10,15}$/)) {
+        telefone = parts[0]
+      }
     }
 
     // ============================
