@@ -11,10 +11,28 @@ app.use(express.json())
 // CONEXÃO SUPABASE
 // ============================
 
+const supabaseUrl = process.env.SUPABASE_URL
+const supabaseKey = process.env.SUPABASE_SECRET_KEY
+
+if (!supabaseUrl || !supabaseKey) {
+  console.error("ERRO: SUPABASE_URL ou SUPABASE_SECRET_KEY não configuradas!")
+}
+
 const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SECRET_KEY
+  supabaseUrl || "",
+  supabaseKey || ""
 )
+
+// ============================
+// HEALTH CHECK
+// ============================
+
+app.get("/", (req, res) => {
+  res.status(200).json({
+    status: "online",
+    message: "Webhook WhatsApp ativo"
+  })
+})
 
 // ============================
 // WEBHOOK WHATSAPP
@@ -23,6 +41,9 @@ const supabase = createClient(
 app.post("/webhook/whatsapp", async (req, res) => {
   try {
     const body = req.body
+
+    // Responde rápido para não dar timeout na Evolution API
+    // mas continua processando
 
     // ============================
     // EXTRAÇÃO DOS DADOS
@@ -34,11 +55,13 @@ app.post("/webhook/whatsapp", async (req, res) => {
       null
 
     const nome =
+      body?.data?.pushName ||
       body?.pushName ||
       null
 
     const mensagem =
       body?.data?.message?.conversation ||
+      body?.data?.message?.extendedTextMessage?.text ||
       body?.message?.conversation ||
       ""
 
@@ -46,25 +69,30 @@ app.post("/webhook/whatsapp", async (req, res) => {
       telefone = telefone.replace("@s.whatsapp.net", "")
     }
 
+    // Se não tem telefone, ignora (pode ser evento de status, etc.)
     if (!telefone) {
-      return res.status(200).json({ success: true })
+      return res.status(200).json({ success: true, info: "sem telefone" })
     }
 
     // ============================
     // BUSCA REGRAS ATIVAS
     // ============================
 
-    const { data: regras } = await supabase
+    const { data: regras, error: erroRegras } = await supabase
       .from("regras")
       .select("*")
       .eq("ativo", true)
+
+    if (erroRegras) {
+      console.error("Erro ao buscar regras:", erroRegras)
+    }
 
     let novaOrigem = null
     let novoStatus = null
 
     if (regras && mensagem) {
-      for (let regra of regras) {
-        const textoRegra = regra.texto.toLowerCase()
+      for (const regra of regras) {
+        const textoRegra = (regra.texto || "").toLowerCase()
         const msg = mensagem.toLowerCase()
 
         let bateu = false
@@ -93,27 +121,39 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // VERIFICA SE CONVERSA EXISTE
     // ============================
 
-    const { data: conversaExistente } = await supabase
+    const { data: conversaExistente, error: erroBusca } = await supabase
       .from("conversas")
       .select("*")
       .eq("telefone", telefone)
       .maybeSingle()
 
+    if (erroBusca) {
+      console.error("Erro ao buscar conversa:", erroBusca)
+      throw erroBusca
+    }
+
     let conversaId
 
     if (!conversaExistente) {
+      // ============================
       // CRIA NOVA CONVERSA
+      // ============================
+
+      const novaConversaData = {
+        telefone,
+        nome: nome || null,
+        origem: novaOrigem || null,
+        status: novoStatus || "NOVO"
+      }
+
+      // Adiciona ultima_mensagem se existir a coluna
+      if (mensagem) {
+        novaConversaData.ultima_mensagem = mensagem
+      }
 
       const { data: novaConversa, error } = await supabase
         .from("conversas")
-        .insert([
-          {
-            telefone,
-            nome,
-            origem: novaOrigem,
-            status: novoStatus || "NOVO"
-          }
-        ])
+        .insert([novaConversaData])
         .select()
         .single()
 
@@ -125,11 +165,13 @@ app.post("/webhook/whatsapp", async (req, res) => {
       conversaId = novaConversa.id
 
     } else {
+      // ============================
       // ATUALIZA CONVERSA EXISTENTE
+      // ============================
 
       conversaId = conversaExistente.id
 
-      let updateData = {}
+      const updateData = {}
 
       if (!conversaExistente.origem && novaOrigem) {
         updateData.origem = novaOrigem
@@ -139,11 +181,23 @@ app.post("/webhook/whatsapp", async (req, res) => {
         updateData.status = novoStatus
       }
 
+      if (nome && !conversaExistente.nome) {
+        updateData.nome = nome
+      }
+
+      if (mensagem) {
+        updateData.ultima_mensagem = mensagem
+      }
+
       if (Object.keys(updateData).length > 0) {
-        await supabase
+        const { error: erroUpdate } = await supabase
           .from("conversas")
           .update(updateData)
           .eq("id", conversaId)
+
+        if (erroUpdate) {
+          console.error("Erro ao atualizar conversa:", erroUpdate)
+        }
       }
     }
 
@@ -151,26 +205,28 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // SALVA MENSAGEM
     // ============================
 
-    const { error: erroMensagem } = await supabase
-      .from("mensagens")
-      .insert([
-        {
-          conversa_id: conversaId,
-          mensagem,
-          origem_mensagem: "cliente"
-        }
-      ])
+    if (mensagem) {
+      const { error: erroMensagem } = await supabase
+        .from("mensagens")
+        .insert([
+          {
+            conversa_id: conversaId,
+            mensagem,
+            origem_mensagem: "cliente"
+          }
+        ])
 
-    if (erroMensagem) {
-      console.error("Erro ao salvar mensagem:", erroMensagem)
-      throw erroMensagem
+      if (erroMensagem) {
+        console.error("Erro ao salvar mensagem:", erroMensagem)
+        throw erroMensagem
+      }
     }
 
     return res.status(200).json({ success: true })
 
   } catch (error) {
     console.error("ERRO NO WEBHOOK:", error)
-    return res.status(500).json({ error: "Erro interno" })
+    return res.status(200).json({ success: false, error: "Erro interno" })
   }
 })
 
@@ -178,6 +234,4 @@ app.post("/webhook/whatsapp", async (req, res) => {
 // EXPORTAÇÃO PARA VERCEL
 // ============================
 
-module.exports = (req, res) => {
-  app(req, res)
-}
+module.exports = app
