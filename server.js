@@ -50,6 +50,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // ============================
 
     let telefone =
+      body?.data?.key?.remoteJidAlt ||
       body?.data?.key?.remoteJid ||
       body?.from ||
       null
