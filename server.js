@@ -205,14 +205,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // SALVA MENSAGEM
     // ============================
 
+    // Tabela mensagens usa: telefone, mensagem, direcao
+    // (não usa conversa_id)
     if (mensagem) {
       const { error: erroMensagem } = await supabase
         .from("mensagens")
         .insert([
           {
-            conversa_id: conversaId,
+            telefone,
             mensagem,
-            origem_mensagem: "cliente"
+            direcao: "entrada"
           }
         ])
 
