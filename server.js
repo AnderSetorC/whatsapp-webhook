@@ -83,6 +83,14 @@ app.post("/webhook/whatsapp", async (req, res) => {
       return res.status(200).json({ success: true, info: "ignorado" })
     }
 
+    // Loga body completo quando for @lid para investigar telefone real
+    if (isLid) {
+      console.log("=== MENSAGEM @LID DETECTADA ===")
+      console.log("remoteJid:", telefone)
+      console.log("BODY COMPLETO:", JSON.stringify(body, null, 2))
+      console.log("=== FIM @LID ===")
+    }
+
     // Limpa o telefone removendo sufixos do WhatsApp
     telefone = telefone
       .replace("@s.whatsapp.net", "")
