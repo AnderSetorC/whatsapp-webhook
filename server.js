@@ -7,14 +7,26 @@ const app = express()
 app.use(cors())
 app.use(express.json())
 
+// ============================
+// CONEXÃO SUPABASE
+// ============================
+
 const supabase = createClient(
   process.env.SUPABASE_URL,
   process.env.SUPABASE_SECRET_KEY
 )
 
+// ============================
+// WEBHOOK WHATSAPP
+// ============================
+
 app.post("/webhook/whatsapp", async (req, res) => {
   try {
     const body = req.body
+
+    // ============================
+    // EXTRAÇÃO DOS DADOS
+    // ============================
 
     let telefone =
       body?.data?.key?.remoteJid ||
@@ -37,6 +49,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
     if (!telefone) {
       return res.status(200).json({ success: true })
     }
+
+    // ============================
+    // BUSCA REGRAS ATIVAS
+    // ============================
 
     const { data: regras } = await supabase
       .from("regras")
@@ -73,16 +89,22 @@ app.post("/webhook/whatsapp", async (req, res) => {
       }
     }
 
+    // ============================
+    // VERIFICA SE CONVERSA EXISTE
+    // ============================
+
     const { data: conversaExistente } = await supabase
       .from("conversas")
       .select("*")
       .eq("telefone", telefone)
-      .single()
+      .maybeSingle()
 
     let conversaId
 
     if (!conversaExistente) {
-      const { data: novaConversa } = await supabase
+      // CRIA NOVA CONVERSA
+
+      const { data: novaConversa, error } = await supabase
         .from("conversas")
         .insert([
           {
@@ -95,8 +117,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
         .select()
         .single()
 
+      if (error) {
+        console.error("Erro ao criar conversa:", error)
+        throw error
+      }
+
       conversaId = novaConversa.id
+
     } else {
+      // ATUALIZA CONVERSA EXISTENTE
+
       conversaId = conversaExistente.id
 
       let updateData = {}
@@ -117,13 +147,24 @@ app.post("/webhook/whatsapp", async (req, res) => {
       }
     }
 
-    await supabase.from("mensagens").insert([
-      {
-        conversa_id: conversaId,
-        mensagem,
-        origem_mensagem: "cliente"
-      }
-    ])
+    // ============================
+    // SALVA MENSAGEM
+    // ============================
+
+    const { error: erroMensagem } = await supabase
+      .from("mensagens")
+      .insert([
+        {
+          conversa_id: conversaId,
+          mensagem,
+          origem_mensagem: "cliente"
+        }
+      ])
+
+    if (erroMensagem) {
+      console.error("Erro ao salvar mensagem:", erroMensagem)
+      throw erroMensagem
+    }
 
     return res.status(200).json({ success: true })
 
@@ -133,4 +174,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
   }
 })
 
-module.exports = app
+// ============================
+// EXPORTAÇÃO PARA VERCEL
+// ============================
+
+module.exports = (req, res) => {
+  app(req, res)
+}
