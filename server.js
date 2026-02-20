@@ -175,7 +175,8 @@ app.post("/webhook/whatsapp", async (req, res) => {
         telefone,
         nome: nome || null,
         origem: novaOrigem || null,
-        status: novoStatus || "NOVO"
+        status: novoStatus || "NOVO",
+        atualizado_em: new Date().toISOString()
       }
 
       // Adiciona ultima_mensagem se existir a coluna
@@ -220,6 +221,9 @@ app.post("/webhook/whatsapp", async (req, res) => {
       if (mensagem) {
         updateData.ultima_mensagem = mensagem
       }
+
+      // Sempre atualiza o timestamp da última interação
+      updateData.atualizado_em = new Date().toISOString()
 
       if (Object.keys(updateData).length > 0) {
         const { error: erroUpdate } = await supabase
