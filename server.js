@@ -30,7 +30,8 @@ const supabase = createClient(
 app.get("/", (req, res) => {
   res.status(200).json({
     status: "online",
-    message: "Webhook WhatsApp ativo"
+    message: "CRM WhatsApp Multi-Cliente ativo",
+    version: "3.0"
   })
 })
 
@@ -41,9 +42,6 @@ app.get("/", (req, res) => {
 app.post("/webhook/whatsapp", async (req, res) => {
   try {
     const body = req.body
-
-    // Responde rápido para não dar timeout na Evolution API
-    // mas continua processando
 
     // ============================
     // EXTRAÇÃO DOS DADOS
@@ -66,6 +64,8 @@ app.post("/webhook/whatsapp", async (req, res) => {
       body?.message?.conversation ||
       ""
 
+    const instanceName = body?.instance || null
+
     if (!telefone) {
       return res.status(200).json({ success: true, info: "sem telefone" })
     }
@@ -79,26 +79,15 @@ app.post("/webhook/whatsapp", async (req, res) => {
     const isNewsletter = telefone.includes("newsletter")
     const isStatus = telefone === "status@broadcast"
 
-    // Ignora status e newsletters
     if (isStatus || isNewsletter) {
       return res.status(200).json({ success: true, info: "ignorado" })
     }
 
-    // Loga body completo quando for @lid para investigar telefone real
-    if (isLid) {
-      console.log("=== MENSAGEM @LID DETECTADA ===")
-      console.log("remoteJid:", telefone)
-      console.log("BODY COMPLETO:", JSON.stringify(body, null, 2))
-      console.log("=== FIM @LID ===")
-    }
-
-    // Limpa o telefone removendo sufixos do WhatsApp
     telefone = telefone
       .replace("@s.whatsapp.net", "")
       .replace("@g.us", "")
       .replace("@lid", "")
 
-    // Para grupos/listas (formato: 5514991291256-1560098577), pega só o primeiro número
     if (isGroup || isLid) {
       const parts = telefone.split("-")
       if (parts.length > 1 && parts[0].match(/^\d{10,15}$/)) {
@@ -107,13 +96,39 @@ app.post("/webhook/whatsapp", async (req, res) => {
     }
 
     // ============================
+    // IDENTIFICA INSTÂNCIA
+    // ============================
+
+    let instanciaId = null
+
+    if (instanceName) {
+      const { data: instancia } = await supabase
+        .from("instancias")
+        .select("id")
+        .eq("evolution_instance_name", instanceName)
+        .maybeSingle()
+
+      if (instancia) {
+        instanciaId = instancia.id
+      } else {
+        console.log("Instância não encontrada:", instanceName)
+      }
+    }
+
+    // ============================
     // BUSCA REGRAS ATIVAS
     // ============================
 
-    const { data: regras, error: erroRegras } = await supabase
+    let regrasQuery = supabase
       .from("regras")
       .select("*")
       .eq("ativo", true)
+
+    if (instanciaId) {
+      regrasQuery = regrasQuery.or(`instancia_id.eq.${instanciaId},instancia_id.is.null`)
+    }
+
+    const { data: regras, error: erroRegras } = await regrasQuery
 
     if (erroRegras) {
       console.error("Erro ao buscar regras:", erroRegras)
@@ -153,11 +168,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // VERIFICA SE CONVERSA EXISTE
     // ============================
 
-    const { data: conversaExistente, error: erroBusca } = await supabase
+    let conversaQuery = supabase
       .from("conversas")
       .select("*")
       .eq("telefone", telefone)
-      .maybeSingle()
+
+    if (instanciaId) {
+      conversaQuery = conversaQuery.eq("instancia_id", instanciaId)
+    }
+
+    const { data: conversaExistente, error: erroBusca } = await conversaQuery.maybeSingle()
 
     if (erroBusca) {
       console.error("Erro ao buscar conversa:", erroBusca)
@@ -167,19 +187,15 @@ app.post("/webhook/whatsapp", async (req, res) => {
     let conversaId
 
     if (!conversaExistente) {
-      // ============================
-      // CRIA NOVA CONVERSA
-      // ============================
-
       const novaConversaData = {
         telefone,
         nome: nome || null,
         origem: novaOrigem || null,
         status: novoStatus || "NOVO",
-        atualizado_em: new Date().toISOString()
+        atualizado_em: new Date().toISOString(),
+        instancia_id: instanciaId
       }
 
-      // Adiciona ultima_mensagem se existir a coluna
       if (mensagem) {
         novaConversaData.ultima_mensagem = mensagem
       }
@@ -198,10 +214,6 @@ app.post("/webhook/whatsapp", async (req, res) => {
       conversaId = novaConversa.id
 
     } else {
-      // ============================
-      // ATUALIZA CONVERSA EXISTENTE
-      // ============================
-
       conversaId = conversaExistente.id
 
       const updateData = {}
@@ -222,7 +234,6 @@ app.post("/webhook/whatsapp", async (req, res) => {
         updateData.ultima_mensagem = mensagem
       }
 
-      // Sempre atualiza o timestamp da última interação
       updateData.atualizado_em = new Date().toISOString()
 
       if (Object.keys(updateData).length > 0) {
@@ -241,8 +252,6 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // SALVA MENSAGEM
     // ============================
 
-    // Tabela mensagens usa: telefone, mensagem, direcao
-    // (não usa conversa_id)
     if (mensagem) {
       const { error: erroMensagem } = await supabase
         .from("mensagens")
@@ -250,7 +259,8 @@ app.post("/webhook/whatsapp", async (req, res) => {
           {
             telefone,
             mensagem,
-            direcao: "entrada"
+            direcao: "entrada",
+            instancia_id: instanciaId
           }
         ])
 
@@ -266,6 +276,416 @@ app.post("/webhook/whatsapp", async (req, res) => {
     console.error("ERRO NO WEBHOOK:", error)
     return res.status(200).json({ success: false, error: "Erro interno" })
   }
+})
+
+// ============================================
+// PROXY EVOLUTION API (v2)
+// ============================================
+
+// Criar instância
+app.post("/api/instance/create", async (req, res) => {
+  try {
+    const { instanceName, evolutionUrl, evolutionApiKey, clientName } = req.body
+
+    const createResponse = await fetch(`${evolutionUrl}/instance/create`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": evolutionApiKey
+      },
+      body: JSON.stringify({
+        instanceName,
+        integration: "WHATSAPP-BAILEYS",
+        qrcode: true
+      })
+    })
+
+    const createData = await createResponse.json()
+
+    if (!createResponse.ok) {
+      return res.status(400).json({ error: "Erro ao criar instância", details: createData })
+    }
+
+    // Configura webhook automaticamente
+    await fetch(`${evolutionUrl}/webhook/set/${instanceName}`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "apikey": evolutionApiKey
+      },
+      body: JSON.stringify({
+        webhook: {
+          enabled: true,
+          url: "https://whatsapp-webhook-liart.vercel.app/webhook/whatsapp",
+          webhookByEvents: false,
+          webhookBase64: false,
+          events: ["MESSAGES_UPSERT"]
+        }
+      })
+    })
+
+    // Salva no Supabase
+    const { data: instancia, error } = await supabase
+      .from("instancias")
+      .insert([{
+        nome: clientName || instanceName,
+        evolution_url: evolutionUrl,
+        evolution_api_key: evolutionApiKey,
+        evolution_instance_name: instanceName,
+        ativo: true
+      }])
+      .select()
+      .single()
+
+    if (error) {
+      console.error("Erro ao salvar instância:", error)
+    }
+
+    return res.json({
+      success: true,
+      instance: createData,
+      instancia_id: instancia?.id,
+      qrcode: createData?.qrcode
+    })
+
+  } catch (error) {
+    console.error("Erro ao criar instância:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// QR Code para conectar
+app.get("/api/instance/connect/:name", async (req, res) => {
+  try {
+    const { name } = req.params
+
+    const { data: instancia } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("evolution_instance_name", name)
+      .maybeSingle()
+
+    if (!instancia) {
+      return res.status(404).json({ error: "Instância não encontrada" })
+    }
+
+    const response = await fetch(
+      `${instancia.evolution_url}/instance/connect/${name}`,
+      { headers: { "apikey": instancia.evolution_api_key } }
+    )
+
+    const data = await response.json()
+    return res.json(data)
+
+  } catch (error) {
+    console.error("Erro ao conectar:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// Status da conexão
+app.get("/api/instance/status/:name", async (req, res) => {
+  try {
+    const { name } = req.params
+
+    const { data: instancia } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("evolution_instance_name", name)
+      .maybeSingle()
+
+    if (!instancia) {
+      return res.status(404).json({ error: "Instância não encontrada" })
+    }
+
+    const response = await fetch(
+      `${instancia.evolution_url}/instance/connectionState/${name}`,
+      { headers: { "apikey": instancia.evolution_api_key } }
+    )
+
+    const data = await response.json()
+
+    // Se conectou, busca e salva o número
+    if (data?.instance?.state === "open" || data?.state === "open") {
+      try {
+        const infoResponse = await fetch(
+          `${instancia.evolution_url}/instance/fetchInstances?instanceName=${name}`,
+          { headers: { "apikey": instancia.evolution_api_key } }
+        )
+        const infoData = await infoResponse.json()
+        const numero = infoData?.[0]?.instance?.owner ||
+                       infoData?.instance?.owner || null
+
+        if (numero) {
+          const telefoneConectado = numero.replace("@s.whatsapp.net", "").split(":")[0]
+          await supabase
+            .from("instancias")
+            .update({
+              telefone_conectado: telefoneConectado,
+              atualizado_em: new Date().toISOString()
+            })
+            .eq("id", instancia.id)
+        }
+      } catch (e) {
+        console.error("Erro ao buscar número:", e)
+      }
+    }
+
+    return res.json(data)
+
+  } catch (error) {
+    console.error("Erro ao buscar status:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// Desconectar
+app.delete("/api/instance/logout/:name", async (req, res) => {
+  try {
+    const { name } = req.params
+
+    const { data: instancia } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("evolution_instance_name", name)
+      .maybeSingle()
+
+    if (!instancia) {
+      return res.status(404).json({ error: "Instância não encontrada" })
+    }
+
+    const response = await fetch(
+      `${instancia.evolution_url}/instance/logout/${name}`,
+      { method: "DELETE", headers: { "apikey": instancia.evolution_api_key } }
+    )
+
+    const data = await response.json()
+
+    await supabase
+      .from("instancias")
+      .update({ telefone_conectado: null, atualizado_em: new Date().toISOString() })
+      .eq("id", instancia.id)
+
+    return res.json(data)
+
+  } catch (error) {
+    console.error("Erro ao desconectar:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// Deletar instância
+app.delete("/api/instance/delete/:name", async (req, res) => {
+  try {
+    const { name } = req.params
+
+    const { data: instancia } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("evolution_instance_name", name)
+      .maybeSingle()
+
+    if (!instancia) {
+      return res.status(404).json({ error: "Instância não encontrada" })
+    }
+
+    const response = await fetch(
+      `${instancia.evolution_url}/instance/delete/${name}`,
+      { method: "DELETE", headers: { "apikey": instancia.evolution_api_key } }
+    )
+
+    const data = await response.json()
+
+    await supabase
+      .from("instancias")
+      .update({ ativo: false, atualizado_em: new Date().toISOString() })
+      .eq("id", instancia.id)
+
+    return res.json(data)
+
+  } catch (error) {
+    console.error("Erro ao deletar:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// Listar instâncias
+app.get("/api/instances", async (req, res) => {
+  try {
+    const { data: instancias } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("ativo", true)
+      .order("criado_em", { ascending: false })
+
+    return res.json(instancias || [])
+
+  } catch (error) {
+    console.error("Erro ao listar:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// ============================================
+// PÁGINA DE QR CODE COMPARTILHÁVEL
+// ============================================
+
+app.get("/connect/:name", async (req, res) => {
+  const { name } = req.params
+
+  const html = `<!DOCTYPE html>
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Conectar WhatsApp</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: linear-gradient(135deg, #0a1628 0%, #1a2d4a 100%);
+      min-height: 100vh;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      color: white;
+    }
+    .container {
+      background: rgba(255,255,255,0.08);
+      backdrop-filter: blur(20px);
+      border-radius: 24px;
+      padding: 40px;
+      max-width: 420px;
+      width: 90%;
+      text-align: center;
+      border: 1px solid rgba(255,255,255,0.1);
+      box-shadow: 0 20px 60px rgba(0,0,0,0.3);
+    }
+    .logo { font-size: 48px; margin-bottom: 16px; }
+    h1 { font-size: 22px; margin-bottom: 8px; }
+    .subtitle { color: rgba(255,255,255,0.6); font-size: 14px; margin-bottom: 32px; }
+    .qr-box {
+      background: white;
+      border-radius: 16px;
+      padding: 20px;
+      display: inline-block;
+      margin-bottom: 24px;
+    }
+    .qr-box img { width: 256px; height: 256px; display: block; }
+    .badge {
+      padding: 12px 24px;
+      border-radius: 12px;
+      font-size: 14px;
+      font-weight: 500;
+      margin-bottom: 16px;
+    }
+    .badge.waiting { background: rgba(255,193,7,0.15); color: #ffc107; border: 1px solid rgba(255,193,7,0.3); }
+    .badge.ok { background: rgba(76,175,80,0.15); color: #4caf50; border: 1px solid rgba(76,175,80,0.3); }
+    .badge.err { background: rgba(244,67,54,0.15); color: #f44336; border: 1px solid rgba(244,67,54,0.3); }
+    .steps { color: rgba(255,255,255,0.5); font-size: 12px; line-height: 1.8; margin-top: 20px; }
+    .btn {
+      background: rgba(255,255,255,0.1);
+      color: white;
+      border: 1px solid rgba(255,255,255,0.2);
+      padding: 10px 24px;
+      border-radius: 12px;
+      cursor: pointer;
+      font-size: 14px;
+      margin-top: 16px;
+    }
+    .btn:hover { background: rgba(255,255,255,0.2); }
+    .spin {
+      width: 48px; height: 48px;
+      border: 4px solid rgba(255,255,255,0.1);
+      border-top: 4px solid #4caf50;
+      border-radius: 50%;
+      animation: sp 1s linear infinite;
+      margin: 20px auto;
+    }
+    @keyframes sp { to { transform: rotate(360deg); } }
+    .hide { display: none; }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="logo">📱</div>
+    <h1>Conecte seu WhatsApp</h1>
+    <p class="subtitle">Escaneie o QR Code abaixo com seu WhatsApp</p>
+
+    <div id="load"><div class="spin"></div><p style="color:rgba(255,255,255,0.5)">Gerando QR Code...</p></div>
+
+    <div id="qr" class="hide">
+      <div class="qr-box"><img id="qr-img" src="" alt="QR Code"/></div>
+      <div class="badge waiting">Aguardando leitura do QR Code...</div>
+    </div>
+
+    <div id="ok" class="hide">
+      <div style="font-size:64px;margin:20px 0">✅</div>
+      <div class="badge ok">WhatsApp conectado com sucesso!</div>
+      <p style="color:rgba(255,255,255,0.7);margin-top:8px">Você já pode fechar esta página.</p>
+    </div>
+
+    <div id="err" class="hide">
+      <div class="badge err" id="err-msg">Erro ao gerar QR Code</div>
+      <button class="btn" onclick="go()">Tentar novamente</button>
+    </div>
+
+    <div class="steps">
+      <p>1. Abra o WhatsApp no celular</p>
+      <p>2. Toque em Menu → Aparelhos conectados</p>
+      <p>3. Toque em "Conectar aparelho"</p>
+      <p>4. Escaneie o QR Code acima</p>
+    </div>
+  </div>
+
+  <script>
+    const N="${name}", B=window.location.origin;
+    let iv=null;
+
+    async function go(){
+      show("load");
+      try{
+        const r=await fetch(B+"/api/instance/connect/"+N);
+        const d=await r.json();
+        const q=d?.base64||d?.qrcode?.base64||null;
+        if(q){
+          document.getElementById("qr-img").src=q.startsWith("data:")?q:"data:image/png;base64,"+q;
+          show("qr");
+          check();
+        } else throw new Error("QR não disponível");
+      }catch(e){
+        document.getElementById("err-msg").textContent=e.message||"Erro";
+        show("err");
+      }
+    }
+
+    function check(){
+      if(iv)clearInterval(iv);
+      iv=setInterval(async()=>{
+        try{
+          const r=await fetch(B+"/api/instance/status/"+N);
+          const d=await r.json();
+          if((d?.instance?.state||d?.state)==="open"){
+            clearInterval(iv);
+            show("ok");
+          }
+        }catch(e){}
+      },5000);
+    }
+
+    function show(id){
+      ["load","qr","ok","err"].forEach(x=>document.getElementById(x).classList.add("hide"));
+      document.getElementById(id).classList.remove("hide");
+    }
+
+    go();
+    setInterval(()=>{if(!document.getElementById("qr").classList.contains("hide"))go()},45000);
+  </script>
+</body>
+</html>`;
+
+  res.setHeader("Content-Type", "text/html")
+  return res.send(html)
 })
 
 // ============================
