@@ -116,6 +116,32 @@ app.post("/webhook/whatsapp", async (req, res) => {
     }
 
     // ============================
+    // DETECTA REFERÊNCIA NA MENSAGEM
+    // ============================
+
+    let refSource = null
+    let refCampaign = null
+    let refAd = null
+    let refCode = null
+
+    if (mensagem) {
+      const refMatch = mensagem.match(/#ref-([\w-]+)/)
+      if (refMatch) {
+        refCode = refMatch[1]
+        const parts = refCode.split("-")
+        refSource = parts[0] || null
+        refCampaign = parts.slice(1, -1).join("-") || parts[1] || null
+        refAd = parts.length > 2 ? parts[parts.length - 1] : null
+
+        // Se tem 2 partes, segunda é campanha (não anúncio)
+        if (parts.length === 2) {
+          refCampaign = parts[1]
+          refAd = null
+        }
+      }
+    }
+
+    // ============================
     // BUSCA REGRAS ATIVAS
     // ============================
 
@@ -136,6 +162,11 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
     let novaOrigem = null
     let novoStatus = null
+
+    // Referência do link rastreável tem prioridade sobre regras para origem
+    if (refSource) {
+      novaOrigem = refSource.toUpperCase().replace(/_/g, " ")
+    }
 
     if (regras && mensagem) {
       for (const regra of regras) {
@@ -193,7 +224,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
         origem: novaOrigem || null,
         status: novoStatus || "NOVO",
         atualizado_em: new Date().toISOString(),
-        instancia_id: instanciaId
+        instancia_id: instanciaId,
+        campanha: refCampaign || null,
+        anuncio: refAd || null,
+        ref_code: refCode || null
       }
 
       if (mensagem) {
@@ -232,6 +266,17 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
       if (mensagem) {
         updateData.ultima_mensagem = mensagem
+      }
+
+      // Salva dados de campanha se não tinha
+      if (!conversaExistente.campanha && refCampaign) {
+        updateData.campanha = refCampaign
+      }
+      if (!conversaExistente.anuncio && refAd) {
+        updateData.anuncio = refAd
+      }
+      if (!conversaExistente.ref_code && refCode) {
+        updateData.ref_code = refCode
       }
 
       updateData.atualizado_em = new Date().toISOString()
@@ -686,6 +731,65 @@ app.get("/connect/:name", async (req, res) => {
 
   res.setHeader("Content-Type", "text/html")
   return res.send(html)
+})
+
+// ============================================
+// LINKS RASTREÁVEIS
+// ============================================
+
+// Redirecionamento para WhatsApp com rastreamento
+app.get("/go/:instancia", async (req, res) => {
+  try {
+    const { instancia } = req.params
+    const { s, c, a, t } = req.query // source, campaign, ad, text
+
+    // Busca instância no banco
+    const { data: inst } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("evolution_instance_name", instancia)
+      .eq("ativo", true)
+      .maybeSingle()
+
+    if (!inst || !inst.telefone_conectado) {
+      return res.status(404).send("Link não encontrado ou WhatsApp não conectado")
+    }
+
+    // Monta referência
+    let ref = s || "direto"
+    if (c) ref += "-" + c
+    if (a) ref += "-" + a
+
+    // Monta mensagem
+    const texto = t || "Olá! Quero mais informações"
+    const mensagem = texto + " #ref-" + ref
+
+    // Incrementa cliques no link
+    if (s) {
+      const { data: link } = await supabase
+        .from("links_rastreavel")
+        .select("id, cliques")
+        .eq("instancia_id", inst.id)
+        .eq("source", s)
+        .eq("campaign", c || "")
+        .maybeSingle()
+
+      if (link) {
+        await supabase
+          .from("links_rastreavel")
+          .update({ cliques: (link.cliques || 0) + 1 })
+          .eq("id", link.id)
+      }
+    }
+
+    // Redireciona para WhatsApp
+    const waUrl = `https://wa.me/${inst.telefone_conectado}?text=${encodeURIComponent(mensagem)}`
+    return res.redirect(waUrl)
+
+  } catch (error) {
+    console.error("Erro no link rastreável:", error)
+    return res.status(500).send("Erro interno")
+  }
 })
 
 // ============================
