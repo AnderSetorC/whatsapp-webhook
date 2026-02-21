@@ -559,7 +559,8 @@ app.get("/api/instance/status/:name", async (req, res) => {
           { headers: { "apikey": instancia.evolution_api_key } }
         )
         const infoData = await infoResponse.json()
-        const numero = infoData?.[0]?.instance?.owner ||
+        const numero = infoData?.[0]?.ownerJid ||
+                       infoData?.[0]?.instance?.owner ||
                        infoData?.instance?.owner || null
 
         if (numero) {
