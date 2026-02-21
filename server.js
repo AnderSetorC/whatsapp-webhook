@@ -66,6 +66,15 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
     const instanceName = body?.instance || null
 
+    // Log detalhado para debug de telefone
+    console.log("=== MENSAGEM RECEBIDA ===")
+    console.log("remoteJid:", body?.data?.key?.remoteJid)
+    console.log("remoteJidAlt:", body?.data?.key?.remoteJidAlt)
+    console.log("participant:", body?.data?.key?.participant)
+    console.log("telefone extraído:", telefone)
+    console.log("instanceName:", instanceName)
+    console.log("=== FIM ===")
+
     if (!telefone) {
       return res.status(200).json({ success: true, info: "sem telefone" })
     }
