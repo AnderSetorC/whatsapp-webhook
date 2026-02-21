@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
   res.status(200).json({
     status: "online",
     message: "CRM WhatsApp Multi-Cliente ativo",
-    version: "3.3"
+    version: "3.4"
   })
 })
 
@@ -1092,6 +1092,11 @@ async function dispararEventoMeta(instanciaId, conversaId, telefone, estagioNome
           user_data: {}
         }
       ]
+    }
+
+    // Adiciona test_event_code se configurado (para validação no Events Manager)
+    if (metaConfig.test_event_code) {
+      eventData.test_event_code = metaConfig.test_event_code
     }
 
     // Adiciona telefone hashado (SHA-256) se disponível
