@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
   res.status(200).json({
     status: "online",
     message: "CRM WhatsApp Multi-Cliente ativo",
-    version: "3.1"
+    version: "3.2"
   })
 })
 
@@ -265,6 +265,12 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
       conversaId = novaConversa.id
 
+      // Dispara evento Meta se status foi definido
+      if (novoStatus && instanciaId) {
+        dispararEventoMeta(instanciaId, conversaId, telefone, novoStatus)
+          .catch(err => console.error("[META CAPI] Erro async (nova conversa):", err))
+      }
+
     } else {
       conversaId = conversaExistente.id
 
@@ -307,6 +313,12 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
         if (erroUpdate) {
           console.error("Erro ao atualizar conversa:", erroUpdate)
+        }
+
+        // Dispara evento Meta se status mudou
+        if (updateData.status && instanciaId) {
+          dispararEventoMeta(instanciaId, conversaId, telefone, updateData.status)
+            .catch(err => console.error("[META CAPI] Erro async (update conversa):", err))
         }
       }
     }
@@ -878,6 +890,185 @@ app.get("/go/:instancia", async (req, res) => {
   } catch (error) {
     console.error("Erro no link rastreável:", error)
     return res.status(500).send("Erro interno")
+  }
+})
+
+// ============================================
+// META CONVERSION API (CAPI)
+// ============================================
+
+/**
+ * Dispara evento para Meta Conversion API
+ * @param {string} instanciaId - UUID da instância
+ * @param {string} conversaId - UUID da conversa (pode ser null)
+ * @param {string} telefone - Telefone do lead
+ * @param {string} estagioNome - Nome do estágio/status atual
+ * @returns {object} - Resultado do disparo
+ */
+async function dispararEventoMeta(instanciaId, conversaId, telefone, estagioNome) {
+  try {
+    if (!instanciaId || !estagioNome) {
+      console.log("[META CAPI] Sem instanciaId ou estagioNome, ignorando")
+      return null
+    }
+
+    // 1. Busca configuração Meta da instância
+    const { data: metaConfig } = await supabase
+      .from("meta_config")
+      .select("*")
+      .eq("instancia_id", instanciaId)
+      .eq("ativo", true)
+      .maybeSingle()
+
+    if (!metaConfig) {
+      console.log("[META CAPI] Sem config Meta para instância:", instanciaId)
+      return null
+    }
+
+    // 2. Busca mapeamento do estágio para evento Meta
+    const { data: mapeamento } = await supabase
+      .from("mapeamento_eventos")
+      .select("*")
+      .eq("instancia_id", instanciaId)
+      .eq("estagio_nome", estagioNome)
+      .eq("ativo", true)
+      .maybeSingle()
+
+    if (!mapeamento) {
+      console.log("[META CAPI] Sem mapeamento para estágio:", estagioNome)
+      return null
+    }
+
+    // 3. Monta payload da Conversion API
+    const eventoMeta = mapeamento.evento_meta
+    const timestamp = Math.floor(Date.now() / 1000)
+
+    // Formata telefone para padrão E.164 (Brasil)
+    let telFormatado = (telefone || "").replace(/\D/g, "")
+    if (telFormatado && !telFormatado.startsWith("55")) {
+      telFormatado = "55" + telFormatado
+    }
+
+    const eventData = {
+      data: [
+        {
+          event_name: eventoMeta,
+          event_time: timestamp,
+          action_source: "system_generated",
+          user_data: {}
+        }
+      ]
+    }
+
+    // Adiciona telefone hashado (SHA-256) se disponível
+    if (telFormatado) {
+      const crypto = require("crypto")
+      const phoneHash = crypto
+        .createHash("sha256")
+        .update(telFormatado)
+        .digest("hex")
+      eventData.data[0].user_data.ph = [phoneHash]
+    }
+
+    // 4. Envia para Meta CAPI
+    const capiUrl = `https://graph.facebook.com/v21.0/${metaConfig.pixel_id}/events?access_token=${metaConfig.access_token}`
+
+    console.log(`[META CAPI] Disparando evento "${eventoMeta}" para pixel ${metaConfig.pixel_id}`)
+    console.log(`[META CAPI] Telefone: ${telefone}, Estágio: ${estagioNome}`)
+
+    const response = await fetch(capiUrl, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(eventData)
+    })
+
+    const statusCode = response.status
+    const respBody = await response.text()
+
+    console.log(`[META CAPI] Resposta: ${statusCode} - ${respBody}`)
+
+    // 5. Salva log
+    await supabase.from("log_eventos_meta").insert([
+      {
+        instancia_id: instanciaId,
+        conversa_id: conversaId || null,
+        telefone: telefone || null,
+        evento_meta: eventoMeta,
+        estagio_origem: estagioNome,
+        status_resposta: statusCode,
+        resposta: respBody.substring(0, 1000)
+      }
+    ])
+
+    return { success: statusCode >= 200 && statusCode < 300, statusCode, evento: eventoMeta }
+
+  } catch (error) {
+    console.error("[META CAPI] Erro ao disparar evento:", error)
+
+    // Log de erro
+    try {
+      await supabase.from("log_eventos_meta").insert([
+        {
+          instancia_id: instanciaId,
+          conversa_id: conversaId || null,
+          telefone: telefone || null,
+          evento_meta: estagioNome,
+          estagio_origem: estagioNome,
+          status_resposta: 0,
+          resposta: error.message || "Erro desconhecido"
+        }
+      ])
+    } catch (logErr) {
+      console.error("[META CAPI] Erro ao salvar log:", logErr)
+    }
+
+    return { success: false, error: error.message }
+  }
+}
+
+// Endpoint para disparo manual (painel arrasta no funil / muda status)
+app.post("/api/meta/evento", async (req, res) => {
+  try {
+    const { instancia_id, conversa_id, telefone, estagio_nome } = req.body
+
+    if (!instancia_id || !estagio_nome) {
+      return res.status(400).json({ error: "instancia_id e estagio_nome são obrigatórios" })
+    }
+
+    const resultado = await dispararEventoMeta(instancia_id, conversa_id, telefone, estagio_nome)
+
+    if (!resultado) {
+      return res.json({ success: true, info: "Sem configuração Meta ou mapeamento para este estágio" })
+    }
+
+    return res.json(resultado)
+
+  } catch (error) {
+    console.error("Erro no endpoint meta/evento:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// Endpoint para listar logs de eventos Meta
+app.get("/api/meta/logs/:instanciaId", async (req, res) => {
+  try {
+    const { instanciaId } = req.params
+    const limit = parseInt(req.query.limit) || 50
+
+    const { data: logs, error } = await supabase
+      .from("log_eventos_meta")
+      .select("*")
+      .eq("instancia_id", instanciaId)
+      .order("criado_em", { ascending: false })
+      .limit(limit)
+
+    if (error) throw error
+
+    return res.json(logs || [])
+
+  } catch (error) {
+    console.error("Erro ao buscar logs Meta:", error)
+    return res.status(500).json({ error: "Erro interno" })
   }
 })
 
