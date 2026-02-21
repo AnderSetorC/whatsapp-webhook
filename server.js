@@ -47,11 +47,20 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // EXTRAÇÃO DOS DADOS
     // ============================
 
-    let telefone =
-      body?.data?.key?.remoteJidAlt ||
-      body?.data?.key?.remoteJid ||
-      body?.from ||
-      null
+    let telefone = null
+
+    // Pega o telefone real: prioriza o campo que contém @s.whatsapp.net
+    const jid = body?.data?.key?.remoteJid || ""
+    const jidAlt = body?.data?.key?.remoteJidAlt || ""
+
+    if (jid.includes("@s.whatsapp.net")) {
+      telefone = jid
+    } else if (jidAlt.includes("@s.whatsapp.net")) {
+      telefone = jidAlt
+    } else {
+      // Nenhum tem @s.whatsapp.net, usa o que existir
+      telefone = jidAlt || jid || body?.from || null
+    }
 
     const nome =
       body?.data?.pushName ||
