@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
   res.status(200).json({
     status: "online",
     message: "CRM WhatsApp Multi-Cliente ativo",
-    version: "3.0"
+    version: "3.1"
   })
 })
 
@@ -365,8 +365,16 @@ app.post("/api/instance/create", async (req, res) => {
 
     const createData = await createResponse.json()
 
+    // Se instância já existe na Evolution, não é erro fatal
     if (!createResponse.ok) {
-      return res.status(400).json({ error: "Erro ao criar instância", details: createData })
+      const errMsg = JSON.stringify(createData).toLowerCase()
+      const alreadyExists = errMsg.includes("already") || errMsg.includes("exists") || errMsg.includes("já existe")
+
+      if (!alreadyExists) {
+        return res.status(400).json({ error: "Erro ao criar instância", details: createData })
+      }
+
+      console.log("Instância já existe na Evolution, continuando:", instanceName)
     }
 
     // Configura webhook automaticamente
@@ -387,21 +395,50 @@ app.post("/api/instance/create", async (req, res) => {
       })
     })
 
-    // Salva no Supabase
-    const { data: instancia, error } = await supabase
+    // Verifica se já existe no Supabase (evita duplicação)
+    const { data: existente } = await supabase
       .from("instancias")
-      .insert([{
-        nome: clientName || instanceName,
-        evolution_url: evolutionUrl,
-        evolution_api_key: evolutionApiKey,
-        evolution_instance_name: instanceName,
-        ativo: true
-      }])
-      .select()
-      .single()
+      .select("id")
+      .eq("evolution_instance_name", instanceName)
+      .maybeSingle()
 
-    if (error) {
-      console.error("Erro ao salvar instância:", error)
+    let instancia = existente
+
+    if (existente) {
+      // Já existe: reativa se estava inativa
+      const { data: updated, error } = await supabase
+        .from("instancias")
+        .update({
+          nome: clientName || instanceName,
+          evolution_url: evolutionUrl,
+          evolution_api_key: evolutionApiKey,
+          ativo: true,
+          atualizado_em: new Date().toISOString()
+        })
+        .eq("id", existente.id)
+        .select()
+        .single()
+
+      if (error) console.error("Erro ao atualizar instância:", error)
+      instancia = updated || existente
+      console.log("Instância já existia no Supabase, atualizada:", instanceName)
+    } else {
+      // Não existe: cria nova
+      const { data: nova, error } = await supabase
+        .from("instancias")
+        .insert([{
+          nome: clientName || instanceName,
+          evolution_url: evolutionUrl,
+          evolution_api_key: evolutionApiKey,
+          evolution_instance_name: instanceName,
+          ativo: true
+        }])
+        .select()
+        .single()
+
+      if (error) console.error("Erro ao salvar instância:", error)
+      instancia = nova
+      console.log("Nova instância criada no Supabase:", instanceName)
     }
 
     return res.json({
@@ -432,13 +469,47 @@ app.get("/api/instance/connect/:name", async (req, res) => {
       return res.status(404).json({ error: "Instância não encontrada" })
     }
 
+    // Primeira tentativa: pedir QR normalmente
     const response = await fetch(
       `${instancia.evolution_url}/instance/connect/${name}`,
       { headers: { "apikey": instancia.evolution_api_key } }
     )
 
     const data = await response.json()
-    return res.json(data)
+    const qr = data?.base64 || data?.qrcode?.base64 || null
+
+    if (qr) {
+      return res.json(data)
+    }
+
+    // Se não veio QR, tenta restart da instância e pede QR de novo
+    console.log("QR não disponível, tentando restart da instância:", name)
+
+    try {
+      await fetch(
+        `${instancia.evolution_url}/instance/restart/${name}`,
+        {
+          method: "PUT",
+          headers: { "apikey": instancia.evolution_api_key }
+        }
+      )
+
+      // Aguarda 2s para a instância reiniciar
+      await new Promise(resolve => setTimeout(resolve, 2000))
+
+      const retryResponse = await fetch(
+        `${instancia.evolution_url}/instance/connect/${name}`,
+        { headers: { "apikey": instancia.evolution_api_key } }
+      )
+
+      const retryData = await retryResponse.json()
+      return res.json(retryData)
+
+    } catch (restartErr) {
+      console.error("Erro no restart:", restartErr)
+      // Retorna o resultado original mesmo sem QR
+      return res.json(data)
+    }
 
   } catch (error) {
     console.error("Erro ao conectar:", error)
