@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
   res.status(200).json({
     status: "online",
     message: "CRM WhatsApp Multi-Cliente ativo",
-    version: "3.2"
+    version: "3.3"
   })
 })
 
@@ -616,6 +616,140 @@ app.delete("/api/instance/logout/:name", async (req, res) => {
 
   } catch (error) {
     console.error("Erro ao desconectar:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// Reconectar instância (sem precisar escanear QR novamente)
+app.put("/api/instance/restart/:name", async (req, res) => {
+  try {
+    const { name } = req.params
+
+    const { data: instancia } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("evolution_instance_name", name)
+      .maybeSingle()
+
+    if (!instancia) {
+      return res.status(404).json({ error: "Instância não encontrada" })
+    }
+
+    // Tenta restart na Evolution (mantém sessão, reconecta automaticamente)
+    const response = await fetch(
+      `${instancia.evolution_url}/instance/restart/${name}`,
+      { method: "PUT", headers: { "apikey": instancia.evolution_api_key } }
+    )
+
+    const data = await response.json()
+
+    // Aguarda 3s e verifica se reconectou
+    await new Promise(resolve => setTimeout(resolve, 3000))
+
+    try {
+      const statusRes = await fetch(
+        `${instancia.evolution_url}/instance/connectionState/${name}`,
+        { headers: { "apikey": instancia.evolution_api_key } }
+      )
+      const statusData = await statusRes.json()
+      const state = statusData?.instance?.state || statusData?.state || "unknown"
+
+      // Se reconectou, busca e salva o número
+      if (state === "open") {
+        const infoRes = await fetch(
+          `${instancia.evolution_url}/instance/fetchInstances?instanceName=${name}`,
+          { headers: { "apikey": instancia.evolution_api_key } }
+        )
+        const infoData = await infoRes.json()
+        const numero = infoData?.[0]?.instance?.owner || infoData?.instance?.owner || null
+
+        if (numero) {
+          const telefoneConectado = numero.replace("@s.whatsapp.net", "").split(":")[0]
+          await supabase
+            .from("instancias")
+            .update({ telefone_conectado: telefoneConectado, atualizado_em: new Date().toISOString() })
+            .eq("id", instancia.id)
+        }
+      }
+
+      return res.json({ success: true, state, data })
+
+    } catch (statusErr) {
+      console.error("Erro ao verificar status após restart:", statusErr)
+      return res.json({ success: true, state: "restarting", data })
+    }
+
+  } catch (error) {
+    console.error("Erro ao reconectar:", error)
+    return res.status(500).json({ error: "Erro interno" })
+  }
+})
+
+// Editar instância (nome, URL, API Key)
+app.put("/api/instance/edit/:id", async (req, res) => {
+  try {
+    const { id } = req.params
+    const { nome, evolution_url, evolution_api_key, evolution_instance_name } = req.body
+
+    const { data: instancia } = await supabase
+      .from("instancias")
+      .select("*")
+      .eq("id", id)
+      .maybeSingle()
+
+    if (!instancia) {
+      return res.status(404).json({ error: "Instância não encontrada" })
+    }
+
+    const updateData = { atualizado_em: new Date().toISOString() }
+
+    if (nome !== undefined) updateData.nome = nome
+    if (evolution_url !== undefined) updateData.evolution_url = evolution_url
+    if (evolution_api_key !== undefined) updateData.evolution_api_key = evolution_api_key
+    if (evolution_instance_name !== undefined) updateData.evolution_instance_name = evolution_instance_name
+
+    const { data: updated, error } = await supabase
+      .from("instancias")
+      .update(updateData)
+      .eq("id", id)
+      .select()
+      .single()
+
+    if (error) {
+      console.error("Erro ao editar instância:", error)
+      return res.status(400).json({ error: "Erro ao salvar", details: error })
+    }
+
+    // Se mudou a URL ou API Key da Evolution, reconfigura o webhook
+    if (evolution_url || evolution_api_key) {
+      const evoUrl = evolution_url || instancia.evolution_url
+      const evoKey = evolution_api_key || instancia.evolution_api_key
+      const evoName = evolution_instance_name || instancia.evolution_instance_name
+
+      try {
+        await fetch(`${evoUrl}/webhook/set/${evoName}`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", "apikey": evoKey },
+          body: JSON.stringify({
+            webhook: {
+              enabled: true,
+              url: "https://whatsapp-webhook-liart.vercel.app/webhook/whatsapp",
+              webhookByEvents: false,
+              webhookBase64: false,
+              events: ["MESSAGES_UPSERT"]
+            }
+          })
+        })
+        console.log("Webhook reconfigurado para:", evoName)
+      } catch (webhookErr) {
+        console.error("Erro ao reconfigurar webhook:", webhookErr)
+      }
+    }
+
+    return res.json({ success: true, instancia: updated })
+
+  } catch (error) {
+    console.error("Erro ao editar instância:", error)
     return res.status(500).json({ error: "Erro interno" })
   }
 })
