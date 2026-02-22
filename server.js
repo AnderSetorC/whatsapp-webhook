@@ -217,6 +217,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
           bateu = palavras.some(palavra => msg.includes(palavra))
         }
 
+        if (regra.modo === "word") {
+          // Igual ao contains mas verifica palavra inteira (não substring)
+          // Ex: "valor" NÃO bate em "valorizou", mas bate em "qual o valor"
+          const palavras = textoRegra.split(",").map(p => p.trim()).filter(p => p)
+          bateu = palavras.some(palavra => {
+            const regex = new RegExp(`\\b${palavra.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
+            return regex.test(msg)
+          })
+        }
+
         if (regra.modo === "exact") {
           // Suporta múltiplos textos exatos separados por vírgula
           const textos = textoRegra.split(",").map(p => p.trim()).filter(p => p)
