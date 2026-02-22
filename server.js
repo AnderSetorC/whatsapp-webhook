@@ -134,6 +134,23 @@ app.post("/webhook/whatsapp", async (req, res) => {
     }
 
     // ============================
+    // DETECTA SE É GRUPO
+    // ============================
+
+    const isGrupo = telefone && (telefone.length > 15 || telefone.startsWith("120"))
+
+    // Verifica configuração de regras para grupos
+    let aplicarRegrasGrupo = false
+    if (isGrupo && instanciaId) {
+      const { data: configGrupo } = await supabase
+        .from("configuracoes")
+        .select("valor")
+        .eq("chave", `aplicar_regras_grupo_${instanciaId}`)
+        .maybeSingle()
+      aplicarRegrasGrupo = configGrupo?.valor === "true"
+    }
+
+    // ============================
     // DETECTA REFERÊNCIA NA MENSAGEM
     // ============================
 
@@ -186,7 +203,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
       novaOrigem = refSource.toUpperCase().replace(/_/g, " ")
     }
 
-    if (regras && mensagem) {
+    if (regras && mensagem && (!isGrupo || aplicarRegrasGrupo)) {
       for (const regra of regras) {
         const textoRegra = (regra.texto || "").toLowerCase()
         const msg = mensagem.toLowerCase()
@@ -244,8 +261,9 @@ app.post("/webhook/whatsapp", async (req, res) => {
       const novaConversaData = {
         telefone,
         nome: nome || null,
-        origem: novaOrigem || null,
-        status: novoStatus || "NOVO",
+        origem: (isGrupo && !aplicarRegrasGrupo) ? null : (novaOrigem || null),
+        status: (isGrupo && !aplicarRegrasGrupo) ? "GRUPO" : (novoStatus || "NOVO"),
+        is_grupo: isGrupo || false,
         atualizado_em: new Date().toISOString(),
         instancia_id: instanciaId,
         campanha: refCampaign || null,
@@ -281,16 +299,24 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
       const updateData = {}
 
-      if (!conversaExistente.origem && novaOrigem) {
-        updateData.origem = novaOrigem
-      }
+      // Só aplica origem/status se não for grupo ou se regras de grupo estão ativadas
+      if (!isGrupo || aplicarRegrasGrupo) {
+        if (!conversaExistente.origem && novaOrigem) {
+          updateData.origem = novaOrigem
+        }
 
-      if (novoStatus) {
-        updateData.status = novoStatus
+        if (novoStatus) {
+          updateData.status = novoStatus
+        }
       }
 
       if (nome && !conversaExistente.nome) {
         updateData.nome = nome
+      }
+
+      // Marca como grupo se ainda não estava marcado
+      if (isGrupo && !conversaExistente.is_grupo) {
+        updateData.is_grupo = true
       }
 
       if (mensagem) {
