@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
   res.status(200).json({
     status: "online",
     message: "CRM WhatsApp Multi-Cliente ativo",
-    version: "3.4"
+    version: "3.5"
   })
 })
 
@@ -52,13 +52,17 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // Pega o telefone real: prioriza o campo que contém @s.whatsapp.net
     const jid = body?.data?.key?.remoteJid || ""
     const jidAlt = body?.data?.key?.remoteJidAlt || ""
+    const participant = body?.data?.key?.participant || ""
 
     if (jid.includes("@s.whatsapp.net")) {
       telefone = jid
     } else if (jidAlt.includes("@s.whatsapp.net")) {
       telefone = jidAlt
+    } else if (participant.includes("@s.whatsapp.net")) {
+      // Participant pode ter o número real em alguns casos
+      telefone = participant
     } else {
-      // Nenhum tem @s.whatsapp.net, usa o que existir
+      // Nenhum campo tem número real, usa o que existir (pode ser @lid ou @g.us)
       telefone = jidAlt || jid || body?.from || null
     }
 
@@ -81,6 +85,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
     console.log("remoteJidAlt:", body?.data?.key?.remoteJidAlt)
     console.log("participant:", body?.data?.key?.participant)
     console.log("telefone extraído:", telefone)
+    console.log("isLid:", telefone?.includes("@lid") || false)
     console.log("instanceName:", instanceName)
     console.log("=== FIM ===")
 
@@ -101,6 +106,13 @@ app.post("/webhook/whatsapp", async (req, res) => {
       return res.status(200).json({ success: true, info: "ignorado" })
     }
 
+    // Se é @lid em conversa individual (não grupo), ignorar
+    // O próximo webhook virá com o número real
+    if (isLid && !isGroup) {
+      console.log("Ignorando mensagem @lid individual (aguardando número real):", telefone)
+      return res.status(200).json({ success: true, info: "lid ignorado" })
+    }
+
     telefone = telefone
       .replace("@s.whatsapp.net", "")
       .replace("@g.us", "")
@@ -111,6 +123,13 @@ app.post("/webhook/whatsapp", async (req, res) => {
       if (parts.length > 1 && parts[0].match(/^\d{10,15}$/)) {
         telefone = parts[0]
       }
+    }
+
+    // Validação: se o número limpo tem mais de 15 dígitos e não é grupo,
+    // provavelmente é um ID interno (@lid) que passou sem a tag
+    if (!isGroup && telefone.length > 15) {
+      console.log("Ignorando número suspeito (muito longo, provável @lid):", telefone)
+      return res.status(200).json({ success: true, info: "numero suspeito ignorado" })
     }
 
     // ============================
