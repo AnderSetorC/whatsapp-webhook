@@ -194,11 +194,16 @@ app.post("/webhook/whatsapp", async (req, res) => {
         let bateu = false
 
         if (regra.modo === "contains") {
-          bateu = msg.includes(textoRegra)
+          // Suporta múltiplas palavras separadas por vírgula
+          // Ex: "valor, preço, quanto custa, comprar" → bate se qualquer uma estiver na mensagem
+          const palavras = textoRegra.split(",").map(p => p.trim()).filter(p => p)
+          bateu = palavras.some(palavra => msg.includes(palavra))
         }
 
         if (regra.modo === "exact") {
-          bateu = msg === textoRegra
+          // Suporta múltiplos textos exatos separados por vírgula
+          const textos = textoRegra.split(",").map(p => p.trim()).filter(p => p)
+          bateu = textos.some(texto => msg === texto)
         }
 
         if (bateu) {
