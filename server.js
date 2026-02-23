@@ -71,10 +71,6 @@ app.post("/webhook/whatsapp", async (req, res) => {
       body?.pushName ||
       null
 
-    // Se fromMe=true, o pushName é do dono da instância, não do lead
-    // Não usar como nome do contato
-    const nomeContato = fromMe ? null : nome
-
     const mensagem =
       body?.data?.message?.conversation ||
       body?.data?.message?.extendedTextMessage?.text ||
@@ -83,6 +79,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
     // Detecta se a mensagem foi enviada pelo dono da instância
     const fromMe = body?.data?.key?.fromMe || false
+
+    // Se fromMe=true, o pushName é do dono da instância, não do lead
+    // Não usar como nome do contato
+    const nomeContato = fromMe ? null : nome
 
     const instanceName = body?.instance || null
 
