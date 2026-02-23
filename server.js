@@ -71,6 +71,10 @@ app.post("/webhook/whatsapp", async (req, res) => {
       body?.pushName ||
       null
 
+    // Se fromMe=true, o pushName é do dono da instância, não do lead
+    // Não usar como nome do contato
+    const nomeContato = fromMe ? null : nome
+
     const mensagem =
       body?.data?.message?.conversation ||
       body?.data?.message?.extendedTextMessage?.text ||
@@ -293,7 +297,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
     if (!conversaExistente) {
       const novaConversaData = {
         telefone,
-        nome: nome || null,
+        nome: nomeContato || null,
         origem: (isGrupo && !aplicarRegrasGrupo) ? null : (novaOrigem || null),
         status: (isGrupo && !aplicarRegrasGrupo) ? "GRUPO" : (novoStatus || "NOVO"),
         is_grupo: isGrupo || false,
@@ -343,8 +347,8 @@ app.post("/webhook/whatsapp", async (req, res) => {
         }
       }
 
-      if (nome && !conversaExistente.nome) {
-        updateData.nome = nome
+      if (nomeContato && !conversaExistente.nome) {
+        updateData.nome = nomeContato
       }
 
       // Marca como grupo se ainda não estava marcado
