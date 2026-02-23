@@ -71,7 +71,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
       body?.pushName ||
       null
 
-    const mensagem =
+    let mensagem =
       body?.data?.message?.conversation ||
       body?.data?.message?.extendedTextMessage?.text ||
       body?.message?.conversation ||
@@ -200,6 +200,9 @@ app.post("/webhook/whatsapp", async (req, res) => {
           refCampaign = parts[1]
           refAd = null
         }
+
+        // Limpa o #ref- da mensagem (o lead não precisa ver isso)
+        mensagem = mensagem.replace(/#ref-[\w-]+/, "").trim()
       }
     }
 
@@ -295,6 +298,36 @@ app.post("/webhook/whatsapp", async (req, res) => {
     let conversaId
 
     if (!conversaExistente) {
+
+      // Se não tem origem via #ref-, busca clique recente (rastreamento server-side)
+      if (!novaOrigem && !refCode && instanciaId) {
+        const dezMinAtras = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+        const { data: cliqueRecente } = await supabase
+          .from("cliques_rastreavel")
+          .select("*")
+          .eq("instancia_id", instanciaId)
+          .is("conversa_id", null) // Ainda não usado
+          .gte("criado_em", dezMinAtras)
+          .order("criado_em", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (cliqueRecente) {
+          console.log("Clique rastreável encontrado:", cliqueRecente.source, cliqueRecente.campaign)
+          novaOrigem = cliqueRecente.source ? cliqueRecente.source.toUpperCase() : null
+          refCampaign = cliqueRecente.campaign || null
+          refAd = cliqueRecente.ad || null
+          refCode = [cliqueRecente.source, cliqueRecente.campaign, cliqueRecente.ad].filter(Boolean).join("-")
+
+          // Marca clique como usado (será atualizado com conversa_id depois)
+          await supabase
+            .from("cliques_rastreavel")
+            .update({ usado: true })
+            .eq("id", cliqueRecente.id)
+            .catch(err => console.error("Erro ao marcar clique:", err))
+        }
+      }
+
       const novaConversaData = {
         telefone,
         nome: nomeContato || null,
@@ -333,6 +366,33 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
     } else {
       conversaId = conversaExistente.id
+
+      // Se conversa existe mas não tem origem, busca clique recente
+      if (!conversaExistente.origem && !novaOrigem && !refCode && instanciaId) {
+        const dezMinAtras = new Date(Date.now() - 10 * 60 * 1000).toISOString()
+        const { data: cliqueRecente } = await supabase
+          .from("cliques_rastreavel")
+          .select("*")
+          .eq("instancia_id", instanciaId)
+          .is("conversa_id", null)
+          .gte("criado_em", dezMinAtras)
+          .order("criado_em", { ascending: false })
+          .limit(1)
+          .maybeSingle()
+
+        if (cliqueRecente) {
+          console.log("Clique rastreável encontrado (conversa existente):", cliqueRecente.source)
+          novaOrigem = cliqueRecente.source ? cliqueRecente.source.toUpperCase() : null
+          refCampaign = cliqueRecente.campaign || null
+          refAd = cliqueRecente.ad || null
+
+          await supabase
+            .from("cliques_rastreavel")
+            .update({ usado: true, conversa_id: conversaId })
+            .eq("id", cliqueRecente.id)
+            .catch(err => console.error("Erro ao marcar clique:", err))
+        }
+      }
 
       const updateData = {}
 
@@ -1108,7 +1168,7 @@ app.get("/connect/:name", async (req, res) => {
 app.get("/go/:instancia", async (req, res) => {
   try {
     const { instancia } = req.params
-    const { s, c, a, t } = req.query // source, campaign, ad, text
+    const { s, c, a, t, _bob_click } = req.query // source, campaign, ad, text, click_id
 
     // Busca instância no banco
     const { data: inst } = await supabase
@@ -1122,14 +1182,18 @@ app.get("/go/:instancia", async (req, res) => {
       return res.status(404).send("Link não encontrado ou WhatsApp não conectado")
     }
 
-    // Monta referência
-    let ref = s || "direto"
-    if (c) ref += "-" + c
-    if (a) ref += "-" + a
-
-    // Monta mensagem
-    const texto = t || "Olá! Quero mais informações"
-    const mensagem = texto + " #ref-" + ref
+    // Salva clique no banco para rastreamento server-side (mensagem vai limpa)
+    if (s || c || a) {
+      await supabase.from("cliques_rastreavel").insert([{
+        instancia_id: inst.id,
+        source: s || null,
+        campaign: c || null,
+        ad: a || null,
+        click_id: _bob_click || null,
+        telefone_destino: inst.telefone_conectado,
+        criado_em: new Date().toISOString()
+      }]).catch(err => console.error("Erro ao salvar clique:", err))
+    }
 
     // Incrementa cliques no link
     if (s) {
@@ -1149,8 +1213,11 @@ app.get("/go/:instancia", async (req, res) => {
       }
     }
 
+    // Mensagem LIMPA (sem #ref-)
+    const texto = t || "Olá! Quero mais informações"
+
     // Redireciona para WhatsApp
-    const waUrl = `https://wa.me/${inst.telefone_conectado}?text=${encodeURIComponent(mensagem)}`
+    const waUrl = `https://wa.me/${inst.telefone_conectado}?text=${encodeURIComponent(texto)}`
     return res.redirect(waUrl)
 
   } catch (error) {
@@ -1342,6 +1409,74 @@ app.get("/api/meta/logs/:instanciaId", async (req, res) => {
     return res.status(500).json({ error: "Erro interno" })
   }
 })
+
+// ============================================
+// BOB PIXEL — SCRIPT DE RASTREAMENTO
+// ============================================
+
+// Serve o script JS do pixel BOB (colocar no <head> do site do cliente)
+app.get("/pixel/bob.js", (req, res) => {
+  const js = `
+(function() {
+  // Captura UTMs da URL atual
+  var params = new URLSearchParams(window.location.search);
+  var utm_source = params.get('utm_source') || params.get('s') || '';
+  var utm_campaign = params.get('utm_campaign') || params.get('c') || '';
+  var utm_content = params.get('utm_content') || params.get('a') || '';
+  var utm_medium = params.get('utm_medium') || '';
+  var utm_term = params.get('utm_term') || '';
+  var gclid = params.get('gclid') || '';
+  var fbclid = params.get('fbclid') || '';
+
+  // Se tem gclid (Google Ads click ID), marca como google_ads
+  if (gclid && !utm_source) utm_source = 'google_ads';
+  // Se tem fbclid (Facebook click ID), marca como meta_ads
+  if (fbclid && !utm_source) utm_source = 'meta_ads';
+
+  // Salva em cookie (persiste entre páginas)
+  if (utm_source || utm_campaign || gclid || fbclid) {
+    var data = JSON.stringify({
+      s: utm_source,
+      c: utm_campaign,
+      a: utm_content,
+      m: utm_medium,
+      t: utm_term,
+      gclid: gclid,
+      fbclid: fbclid,
+      ts: Date.now()
+    });
+    document.cookie = '_bob_track=' + encodeURIComponent(data) + ';path=/;max-age=3600;SameSite=Lax';
+  }
+
+  // Intercepta cliques em links do BOB (/go/)
+  document.addEventListener('click', function(e) {
+    var link = e.target.closest('a');
+    if (!link) return;
+    var href = link.getAttribute('href') || '';
+    if (href.indexOf('/go/') === -1) return;
+
+    // Recupera dados do cookie
+    var cookie = document.cookie.split(';').find(function(c) { return c.trim().indexOf('_bob_track=') === 0; });
+    if (!cookie) return;
+
+    try {
+      var trackData = JSON.parse(decodeURIComponent(cookie.split('=').slice(1).join('=')));
+      var url = new URL(href, window.location.origin);
+
+      // Adiciona UTMs ao link se não tiver
+      if (trackData.s && !url.searchParams.get('s')) url.searchParams.set('s', trackData.s);
+      if (trackData.c && !url.searchParams.get('c')) url.searchParams.set('c', trackData.c);
+      if (trackData.a && !url.searchParams.get('a')) url.searchParams.set('a', trackData.a);
+
+      link.setAttribute('href', url.toString());
+    } catch(err) { /* ignora erros */ }
+  }, true);
+})();
+`;
+  res.setHeader("Content-Type", "application/javascript");
+  res.setHeader("Cache-Control", "public, max-age=3600");
+  return res.send(js);
+});
 
 // ============================
 // EXPORTAÇÃO PARA VERCEL
