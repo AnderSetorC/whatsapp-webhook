@@ -417,7 +417,70 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
   } catch (error) {
     console.error("ERRO NO WEBHOOK:", error)
+
+    // Salva erro na tabela de logs para monitoramento
+    try {
+      await supabase.from("log_erros").insert([{
+        tipo: "webhook",
+        mensagem: error?.message || String(error),
+        detalhes: JSON.stringify({
+          stack: error?.stack,
+          body_instance: req.body?.instance,
+          body_from: req.body?.data?.key?.remoteJid
+        }),
+        criado_em: new Date().toISOString()
+      }])
+    } catch (logErr) {
+      console.error("Erro ao salvar log de erro:", logErr)
+    }
+
     return res.status(200).json({ success: false, error: "Erro interno" })
+  }
+})
+
+// ============================================
+// MONITORAMENTO DE ERROS
+// ============================================
+
+// Retorna erros recentes (últimas 24h)
+app.get("/api/erros/recentes", async (req, res) => {
+  try {
+    const ontem = new Date(Date.now() - 24 * 60 * 60 * 1000).toISOString()
+
+    const { data: erros, error } = await supabase
+      .from("log_erros")
+      .select("*")
+      .gte("criado_em", ontem)
+      .order("criado_em", { ascending: false })
+      .limit(50)
+
+    if (error) throw error
+
+    res.json({
+      total: erros?.length || 0,
+      erros: erros || []
+    })
+  } catch (error) {
+    console.error("Erro ao buscar logs:", error)
+    res.status(500).json({ error: "Erro ao buscar logs" })
+  }
+})
+
+// Limpar erros antigos (mais de 7 dias)
+app.delete("/api/erros/limpar", async (req, res) => {
+  try {
+    const seteDiasAtras = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000).toISOString()
+
+    const { error } = await supabase
+      .from("log_erros")
+      .delete()
+      .lt("criado_em", seteDiasAtras)
+
+    if (error) throw error
+
+    res.json({ success: true, message: "Erros antigos removidos" })
+  } catch (error) {
+    res.status(500).json({ error: "Erro ao limpar logs" })
   }
 })
 
