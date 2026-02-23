@@ -77,6 +77,9 @@ app.post("/webhook/whatsapp", async (req, res) => {
       body?.message?.conversation ||
       ""
 
+    // Detecta se a mensagem foi enviada pelo dono da instância
+    const fromMe = body?.data?.key?.fromMe || false
+
     const instanceName = body?.instance || null
 
     // Log detalhado para debug de telefone
@@ -85,6 +88,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
     console.log("remoteJidAlt:", body?.data?.key?.remoteJidAlt)
     console.log("participant:", body?.data?.key?.participant)
     console.log("telefone extraído:", telefone)
+    console.log("fromMe:", fromMe)
     console.log("isLid:", telefone?.includes("@lid") || false)
     console.log("instanceName:", instanceName)
     console.log("=== FIM ===")
@@ -222,7 +226,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
       novaOrigem = refSource.toUpperCase().replace(/_/g, " ")
     }
 
-    if (regras && mensagem && (!isGrupo || aplicarRegrasGrupo)) {
+    if (regras && mensagem && !fromMe && (!isGrupo || aplicarRegrasGrupo)) {
       for (const regra of regras) {
         const textoRegra = (regra.texto || "").toLowerCase()
         const msg = mensagem.toLowerCase()
@@ -394,7 +398,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
           {
             telefone,
             mensagem,
-            direcao: "entrada",
+            direcao: fromMe ? "saida" : "entrada",
             instancia_id: instanciaId
           }
         ])
