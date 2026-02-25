@@ -31,7 +31,7 @@ app.get("/", (req, res) => {
   res.status(200).json({
     status: "online",
     message: "CRM WhatsApp Multi-Cliente ativo",
-    version: "3.5"
+    version: "3.6"
   })
 })
 
@@ -88,13 +88,15 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
     // Log detalhado para debug de telefone
     console.log("=== MENSAGEM RECEBIDA ===")
+    console.log("instanceName:", instanceName)
     console.log("remoteJid:", body?.data?.key?.remoteJid)
     console.log("remoteJidAlt:", body?.data?.key?.remoteJidAlt)
     console.log("participant:", body?.data?.key?.participant)
     console.log("telefone extraído:", telefone)
     console.log("fromMe:", fromMe)
     console.log("isLid:", telefone?.includes("@lid") || false)
-    console.log("instanceName:", instanceName)
+    console.log("mensagem:", mensagem)
+    console.log("nomeContato:", nomeContato)
     console.log("=== FIM ===")
 
     if (!telefone) {
@@ -155,9 +157,12 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
       if (instancia) {
         instanciaId = instancia.id
+        console.log("✅ INSTÂNCIA ENCONTRADA:", instanceName, "→", instanciaId)
       } else {
-        console.log("Instância não encontrada:", instanceName)
+        console.log("❌ INSTÂNCIA NÃO ENCONTRADA:", instanceName)
       }
+    } else {
+      console.log("❌ SEM instanceName no webhook")
     }
 
     // ============================
@@ -279,6 +284,13 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // VERIFICA SE CONVERSA EXISTE
     // ============================
 
+    console.log("📞 PROCESSANDO CONVERSA - Telefone:", telefone, "| Instância:", instanciaId)
+
+    if (!instanciaId) {
+      console.log("❌ ABORTANDO: Sem instanciaId para telefone:", telefone)
+      return res.status(200).json({ success: true, info: "sem instancia" })
+    }
+
     let conversaQuery = supabase
       .from("conversas")
       .select("*")
@@ -291,13 +303,25 @@ app.post("/webhook/whatsapp", async (req, res) => {
     const { data: conversaExistente, error: erroBusca } = await conversaQuery.maybeSingle()
 
     if (erroBusca) {
-      console.error("Erro ao buscar conversa:", erroBusca)
+      console.error("❌ ERRO ao buscar conversa existente:", erroBusca)
+      await logError("webhook", `Erro ao buscar conversa: ${erroBusca.message}`, {
+        telefone, 
+        instanciaId,
+        erro: erroBusca
+      })
       throw erroBusca
+    }
+
+    console.log("🔍 CONVERSA EXISTENTE:", conversaExistente ? "SIM" : "NÃO")
+    if (conversaExistente) {
+      console.log("✅ Conversa encontrada ID:", conversaExistente.id, "Status:", conversaExistente.status)
     }
 
     let conversaId
 
     if (!conversaExistente) {
+
+      console.log("🆕 CRIANDO NOVA CONVERSA")
 
       // Se não tem origem via #ref-, busca clique recente (rastreamento server-side)
       if (!novaOrigem && !refCode && instanciaId) {
@@ -341,6 +365,8 @@ app.post("/webhook/whatsapp", async (req, res) => {
         ref_code: refCode || null
       }
 
+      console.log("📝 Dados para inserção:", JSON.stringify(novaConversaData, null, 2))
+
       if (mensagem) {
         novaConversaData.ultima_mensagem = mensagem
       }
@@ -352,14 +378,22 @@ app.post("/webhook/whatsapp", async (req, res) => {
         .single()
 
       if (error) {
-        console.error("Erro ao criar conversa:", error)
+        console.error("❌ ERRO ao criar conversa:", error)
+        await logError("webhook", `Erro ao criar conversa: ${error.message}`, {
+          telefone, 
+          instanciaId,
+          dados: novaConversaData,
+          erro: error
+        })
         throw error
       }
 
       conversaId = novaConversa.id
+      console.log("✅ NOVA CONVERSA CRIADA - ID:", conversaId, "| Telefone:", telefone)
 
       // Dispara evento Meta se status foi definido
       if (novoStatus && instanciaId) {
+        console.log("🚀 Disparando evento Meta para novo status:", novoStatus)
         dispararEventoMeta(instanciaId, conversaId, telefone, novoStatus)
           .catch(err => console.error("[META CAPI] Erro async (nova conversa):", err))
       }
@@ -468,11 +502,20 @@ app.post("/webhook/whatsapp", async (req, res) => {
         ])
 
       if (erroMensagem) {
-        console.error("Erro ao salvar mensagem:", erroMensagem)
+        console.error("❌ ERRO ao salvar mensagem:", erroMensagem)
+        await logError("webhook", `Erro ao salvar mensagem: ${erroMensagem.message}`, {
+          telefone, 
+          instanciaId,
+          mensagem,
+          erro: erroMensagem
+        })
         throw erroMensagem
+      } else {
+        console.log("✅ MENSAGEM SALVA - Telefone:", telefone, "| Instância:", instanciaId)
       }
     }
 
+    console.log("🎉 WEBHOOK PROCESSADO COM SUCESSO - Telefone:", telefone, "| Conversa ID:", conversaId)
     return res.status(200).json({ success: true })
 
   } catch (error) {
