@@ -1237,17 +1237,21 @@ app.get("/go/:instancia", async (req, res) => {
       return res.status(404).send("WhatsApp não conectado")
     }
 
-    // Salva clique no banco para rastreamento server-side (mensagem vai limpa)
+ // Salva clique no banco para rastreamento server-side (mensagem vai limpa)
     if (s || c || a) {
-      await supabase.from("cliques_rastreavel").insert([{
-        instancia_id: inst.id,
-        source: s || null,
-        campaign: c || null,
-        ad: a || null,
-        click_id: _bob_click || null,
-        telefone_destino: telefoneConectado,
-        criado_em: new Date().toISOString()
-      }]).catch(err => console.error("Erro ao salvar clique:", err))
+      try {
+        await supabase.from("cliques_rastreavel").insert([{
+          instancia_id: inst.id,
+          source: s || null,
+          campaign: c || null,
+          ad: a || null,
+          click_id: _bob_click || null,
+          telefone_destino: telefoneConectado,
+          criado_em: new Date().toISOString()
+        }])
+      } catch(err) {
+        console.error("Erro ao salvar clique:", err)
+      }
     }
 
     // Incrementa cliques no link
