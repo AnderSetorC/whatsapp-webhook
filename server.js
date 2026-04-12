@@ -1206,23 +1206,35 @@ app.get("/connect/:name", async (req, res) => {
 // ============================================
 // LINKS RASTREÁVEIS
 // ============================================
-
 // Redirecionamento para WhatsApp com rastreamento
 app.get("/go/:instancia", async (req, res) => {
   try {
     const { instancia } = req.params
     const { s, c, a, t, _bob_click } = req.query // source, campaign, ad, text, click_id
 
-    // Busca instância no banco
-    const { data: inst } = await supabase
+    // Busca todas as instâncias ativas e encontra pelo nome
+    // (evita problema de encoding do nome da coluna em português)
+    const { data: instancias } = await supabase
       .from("instancias")
       .select("*")
-      .eq("evolution_instance_name", instancia)
       .eq("ativo", true)
-      .maybeSingle()
 
-    if (!inst || !inst.telefone_conectado) {
-      return res.status(404).send("Link não encontrado ou WhatsApp não conectado")
+    const inst = instancias?.find(i =>
+      Object.values(i).some(v =>
+        typeof v === "string" && v.toLowerCase() === instancia.toLowerCase()
+      )
+    )
+
+    if (!inst) {
+      console.log("❌ Instância não encontrada para:", instancia)
+      return res.status(404).send("Link não encontrado")
+    }
+
+    const telefoneConectado = inst.telefone_conectado || null
+
+    if (!telefoneConectado) {
+      console.log("❌ Sem telefone_conectado para instância:", instancia)
+      return res.status(404).send("WhatsApp não conectado")
     }
 
     // Salva clique no banco para rastreamento server-side (mensagem vai limpa)
@@ -1233,7 +1245,7 @@ app.get("/go/:instancia", async (req, res) => {
         campaign: c || null,
         ad: a || null,
         click_id: _bob_click || null,
-        telefone_destino: inst.telefone_conectado,
+        telefone_destino: telefoneConectado,
         criado_em: new Date().toISOString()
       }]).catch(err => console.error("Erro ao salvar clique:", err))
     }
@@ -1260,7 +1272,8 @@ app.get("/go/:instancia", async (req, res) => {
     const texto = t || "Olá! Quero mais informações"
 
     // Redireciona para WhatsApp
-    const waUrl = `https://wa.me/${inst.telefone_conectado}?text=${encodeURIComponent(texto)}`
+    const waUrl = `https://wa.me/${telefoneConectado}?text=${encodeURIComponent(texto)}`
+    console.log("✅ Redirecionando para WhatsApp:", waUrl)
     return res.redirect(waUrl)
 
   } catch (error) {
@@ -1268,7 +1281,6 @@ app.get("/go/:instancia", async (req, res) => {
     return res.status(500).send("Erro interno")
   }
 })
-
 // ============================================
 // META CONVERSION API (CAPI)
 // ============================================
