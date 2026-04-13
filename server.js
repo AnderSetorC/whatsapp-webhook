@@ -42,18 +42,14 @@ app.get("/", (req, res) => {
 app.post("/webhook/whatsapp", async (req, res) => {
   try {
     const body = req.body
-
-    // ============================
+// ============================
     // EXTRAÇÃO DOS DADOS
     // ============================
-
     let telefone = null
-
     // Pega o telefone real: prioriza o campo que contém @s.whatsapp.net
     const jid = body?.data?.key?.remoteJid || ""
     const jidAlt = body?.data?.key?.remoteJidAlt || ""
     const participant = body?.data?.key?.participant || ""
-
     if (jid.includes("@s.whatsapp.net")) {
       telefone = jid
     } else if (jidAlt.includes("@s.whatsapp.net")) {
@@ -65,26 +61,28 @@ app.post("/webhook/whatsapp", async (req, res) => {
       // Nenhum campo tem número real, usa o que existir (pode ser @lid ou @g.us)
       telefone = jidAlt || jid || body?.from || null
     }
-
     const nome =
       body?.data?.pushName ||
       body?.pushName ||
       null
-
     let mensagem =
       body?.data?.message?.conversation ||
       body?.data?.message?.extendedTextMessage?.text ||
       body?.message?.conversation ||
       ""
-
     // Detecta se a mensagem foi enviada pelo dono da instância
     const fromMe = body?.data?.key?.fromMe || false
-
     // Se fromMe=true, o pushName é do dono da instância, não do lead
     // Não usar como nome do contato
     const nomeContato = fromMe ? null : nome
-
     const instanceName = body?.instance || null
+
+    // Captura referral do Meta Ads (Click to WhatsApp)
+    const referral = body?.data?.referral || body?.referral || null
+    const ctwaClid = referral?.ctwa_clid || null
+    const adSourceUrl = referral?.source_url || null
+    const adHeadline = referral?.headline || null
+    const adBody = referral?.body || null
 
     // Log detalhado para debug de telefone
     console.log("=== MENSAGEM RECEBIDA ===")
@@ -97,6 +95,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
     console.log("isLid:", telefone?.includes("@lid") || false)
     console.log("mensagem:", mensagem)
     console.log("nomeContato:", nomeContato)
+    console.log("referral:", referral ? JSON.stringify(referral) : "nenhum")
     console.log("=== FIM ===")
 
     if (!telefone) {
@@ -352,7 +351,7 @@ app.post("/webhook/whatsapp", async (req, res) => {
         }
       }
 
-      const novaConversaData = {
+     const novaConversaData = {
         telefone,
         nome: nomeContato || null,
         origem: (isGrupo && !aplicarRegrasGrupo) ? null : (novaOrigem || null),
@@ -362,21 +361,21 @@ app.post("/webhook/whatsapp", async (req, res) => {
         instancia_id: instanciaId,
         campanha: refCampaign || null,
         anuncio: refAd || null,
-        ref_code: refCode || null
+        ref_code: refCode || null,
+        ctwa_clid: ctwaClid || null,
+        ad_source_url: adSourceUrl || null,
+        ad_headline: adHeadline || null,
+        ad_body: adBody || null
       }
-
       console.log("📝 Dados para inserção:", JSON.stringify(novaConversaData, null, 2))
-
       if (mensagem) {
         novaConversaData.ultima_mensagem = mensagem
       }
-
       const { data: novaConversa, error } = await supabase
         .from("conversas")
         .insert([novaConversaData])
         .select()
         .single()
-
       if (error) {
         console.error("❌ ERRO ao criar conversa:", error)
         await logError("webhook", `Erro ao criar conversa: ${error.message}`, {
@@ -387,7 +386,6 @@ app.post("/webhook/whatsapp", async (req, res) => {
         })
         throw error
       }
-
       conversaId = novaConversa.id
       console.log("✅ NOVA CONVERSA CRIADA - ID:", conversaId, "| Telefone:", telefone)
 
@@ -430,30 +428,38 @@ app.post("/webhook/whatsapp", async (req, res) => {
 
       const updateData = {}
 
-      // Só aplica origem/status se não for grupo ou se regras de grupo estão ativadas
+    // Só aplica origem/status se não for grupo ou se regras de grupo estão ativadas
       if (!isGrupo || aplicarRegrasGrupo) {
         if (!conversaExistente.origem && novaOrigem) {
           updateData.origem = novaOrigem
         }
-
         if (novoStatus) {
           updateData.status = novoStatus
         }
       }
-
       if (nomeContato && !conversaExistente.nome) {
         updateData.nome = nomeContato
       }
-
       // Marca como grupo se ainda não estava marcado
       if (isGrupo && !conversaExistente.is_grupo) {
         updateData.is_grupo = true
       }
-
       if (mensagem) {
         updateData.ultima_mensagem = mensagem
       }
-
+      // Salva dados do anúncio Meta se vieram e ainda não existem na conversa
+      if (ctwaClid && !conversaExistente.ctwa_clid) {
+        updateData.ctwa_clid = ctwaClid
+      }
+      if (adSourceUrl && !conversaExistente.ad_source_url) {
+        updateData.ad_source_url = adSourceUrl
+      }
+      if (adHeadline && !conversaExistente.ad_headline) {
+        updateData.ad_headline = adHeadline
+      }
+      if (adBody && !conversaExistente.ad_body) {
+        updateData.ad_body = adBody
+      }
       // Salva dados de campanha se não tinha
       if (!conversaExistente.campanha && refCampaign) {
         updateData.campanha = refCampaign
