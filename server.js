@@ -213,70 +213,59 @@ app.post("/webhook/whatsapp", async (req, res) => {
     // ============================
     // BUSCA REGRAS ATIVAS
     // ============================
-
     let regrasQuery = supabase
       .from("regras")
       .select("*")
       .eq("ativo", true)
-
     if (instanciaId) {
       regrasQuery = regrasQuery.or(`instancia_id.eq.${instanciaId},instancia_id.is.null`)
     }
-
     const { data: regras, error: erroRegras } = await regrasQuery
-
     if (erroRegras) {
       console.error("Erro ao buscar regras:", erroRegras)
     }
-
     let novaOrigem = null
     let novoStatus = null
-
     // Referência do link rastreável tem prioridade sobre regras para origem
     if (refSource) {
       novaOrigem = refSource.toUpperCase().replace(/_/g, " ")
     }
-
     if (regras && mensagem && !fromMe && (!isGrupo || aplicarRegrasGrupo)) {
       for (const regra of regras) {
         const textoRegra = (regra.texto || "").toLowerCase()
         const msg = mensagem.toLowerCase()
-
         let bateu = false
-
         if (regra.modo === "contains") {
-          // Suporta múltiplas palavras separadas por vírgula
-          // Ex: "valor, preço, quanto custa, comprar" → bate se qualquer uma estiver na mensagem
           const palavras = textoRegra.split(",").map(p => p.trim()).filter(p => p)
           bateu = palavras.some(palavra => msg.includes(palavra))
         }
-
         if (regra.modo === "word") {
-          // Igual ao contains mas verifica palavra inteira (não substring)
-          // Ex: "valor" NÃO bate em "valorizou", mas bate em "qual o valor"
           const palavras = textoRegra.split(",").map(p => p.trim()).filter(p => p)
           bateu = palavras.some(palavra => {
             const regex = new RegExp(`\\b${palavra.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i')
             return regex.test(msg)
           })
         }
-
         if (regra.modo === "exact") {
-          // Suporta múltiplos textos exatos separados por vírgula
           const textos = textoRegra.split(",").map(p => p.trim()).filter(p => p)
           bateu = textos.some(texto => msg === texto)
         }
-
         if (bateu) {
           if (regra.tipo_regra === "ORIGEM" && !novaOrigem) {
             novaOrigem = regra.resultado
           }
-
           if (regra.tipo_regra === "STATUS") {
             novoStatus = regra.resultado
           }
         }
       }
+    }
+    // Se veio de anúncio Meta Ads (ctwa_clid), prevalece sobre tudo para origem
+    // Status só é definido como ANUNCIO se nenhuma regra já definiu outro
+    if (ctwaClid) {
+      novaOrigem = "META ADS"
+      novoStatus = novoStatus || "ANUNCIO"
+      console.log("📢 Lead veio de anúncio Meta Ads — origem forçada para META ADS")
     }
 
     // ============================
